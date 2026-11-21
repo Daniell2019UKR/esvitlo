@@ -63,6 +63,29 @@ test('address lookup suggests a queue without changing the saved subscription un
  await f.bot.pollOnce({timeout:0});
  assert.deepEqual((await state()).subscriptions[42].groups,['2.1']);
 });
+
+test('delivers two outage leads and a silent restoration without repeats',async t=>{
+ let instant=new Date('2026-11-13T16:30:15Z');
+ const monitor=day();
+ monitor.groups['1.1'].fill(false,39,42);
+ const f=await setup(t,{now:()=>instant,getSnapshot:()=>({current:{days:[monitor]}})});
+ f.setUpdates([incoming(1,'/group 1.1'),incoming(2,'/reminder 60,15,15'),
+  incoming(3,'/restore 15 0'),{update_id:4,callback_query:{id:'setting',
+   data:'notify:restoration:silent',message:{chat:{id:42,type:'private'},message_id:77}}}]);
+ await f.bot.pollOnce({timeout:0});
+ f.calls.length=0;
+ for(const time of ['16:30:15','17:15:15','18:45:15']){
+  instant=new Date(`2026-11-13T${time}Z`);
+  await f.bot.tickReminders();
+  await f.bot.tickReminders();
+ }
+ const messages=f.calls.filter(call=>call.method==='sendMessage').map(call=>call.payload);
+ assert.equal(messages.length,3);
+ assert.match(messages[0].text,/світла не буде з 19:30/);
+ assert.match(messages[1].text,/світла не буде з 19:30/);
+ assert.match(messages[2].text,/світло відновлять з 21:00/);
+ assert.equal(messages[2].disable_notification,true);
+});
 async function setup(t,options={}) {
  const dir=await mkdtemp(join(tmpdir(),'dtek-telegram-'));t.after(()=>rm(dir,{recursive:true,force:true}));
  let updates=[],failure=null;
