@@ -26,6 +26,15 @@ const notificationLabels={
 const reminderTypes=['reminder','restoration'];
 const minutesList=value=>(Array.isArray(value)?value:[value]).filter(minutes=>Number.isInteger(minutes)&&minutes>=1&&minutes<=180);
 const leadsFor=(sub,place,type)=>minutesList(type==='reminder'?place.lead??sub.reminderLead:place.restore??sub.restorationLead);
+const sortedMinutes=minutes=>[...new Set(minutes)].sort((a,b)=>b-a);
+const reminderTime=minutes=>minutes.length?`${minutes.join(', ')} хв`:'вимкнено';
+const reminderButton=(text,action)=>({text,callback_data:'rem:'+action});
+function parseMinutes(value){
+ const fields=value.trim().split(/\s*,\s*/);
+ if(fields.length>10||!fields.every(field=>/^\d{1,3}$/.test(field)))return null;
+ const minutes=minutesList(fields.map(Number));
+ return minutes.length===fields.length?sortedMinutes(minutes):null;
+}
 const modeLabels={sound:'Зі звуком',silent:'Без звуку',off:'Вимкнено'};
 const modes=Object.keys(modeLabels);
 function notificationMode(subscription,type){
@@ -81,6 +90,92 @@ export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,pu
   return [...(subscription.groups??[]).map(group=>({name:'Основна',region,group,lead:subscription.primaryLead,restore:subscription.primaryRestore})),
    ...(subscription.reminderPlaces??[])];
  }
+ function reminderTarget(sub,id){
+  if(id==='all')return {name:'Усі локації',owner:sub,keys:['reminderLead','restorationLead']};
+  if(id==='home')return {name:'Основна локація',owner:sub,keys:['primaryLead','primaryRestore']};
+  const place=sub.reminderPlaces?.find(item=>item.id===id);
+  return place&&{name:place.name,owner:place,keys:['lead','restore']};
+ }
+ function reminderMenu(chat,sub,action='menu',messageId){
+  const [id,tab,change]=action.split(':');
+  const target=reminderTarget(sub,id);
+  let text='Нагадування про світло\nОберіть локацію.';
+  let rows=[
+   [reminderButton('Для всіх локацій','all')],
+   [reminderButton('Основна локація','home')],
+   ...(sub.reminderPlaces??[]).map(place=>[reminderButton(`${place.name} · ${place.group}`,place.id)]),
+  ];
+  if((sub.reminderPlaces?.length??0)<12)rows.push([reminderButton('＋ Додати локацію','add')]);
+  if(!sub.groups?.length)text+='\nДля основної локації спочатку оберіть чергу через /group.';
+  if(id==='add'&&(sub.reminderPlaces?.length??0)<12){
+   if(!isRegion(tab??'')){
+    text='Додати локацію\nОберіть регіон.';
+    rows=Object.entries(regionNames).map(([code,name])=>[reminderButton(name,'add:'+code)]);
+   }else{
+    const groups=availableGroups({...getSnapshot(tab),region:tab});
+    if(groups.includes(change)){
+     const prompt=`${regionNames[tab]} · черга ${change}\nВведіть назву локації, наприклад «Робота».`;
+     sub.reminderInput={region:tab,group:change,prompt};
+     message(chat,prompt,{replyMarkup:{force_reply:true,input_field_placeholder:'Робота'}});
+     return;
+    }
+    text=`${regionNames[tab]}\nОберіть чергу.`;
+    rows=[];
+    for(let i=0;i<groups.length;i+=4)rows.push(groups.slice(i,i+4).map(group=>reminderButton(group,`add:${tab}:${group}`)));
+    rows.push([reminderButton('‹ Регіони','add')]);
+   }
+   rows.push([reminderButton('‹ Локації','menu')]);
+  }else if(target){
+   const timeFor=index=>minutesList(target.owner[target.keys[index]]??
+    (index===0?sub.reminderLead:sub.restorationLead));
+   const before=tab==='off'?0:tab==='on'?1:-1;
+   text=target.name;
+   if(tab==='remove'&&target.owner!==sub){
+    if(change==='yes'){
+     sub.reminderPlaces=sub.reminderPlaces.filter(place=>place.id!==id);
+     return reminderMenu(chat,sub,'menu',messageId);
+    }
+    text=`Видалити локацію «${target.name}»?`;
+    rows=[[reminderButton('Так, видалити',id+':remove:yes')],[reminderButton('‹ Назад',id)]];
+   }else if(before<0){
+    rows=[
+     [reminderButton('До відключення · '+reminderTime(timeFor(0)),id+':off')],
+     [reminderButton('До відновлення · '+reminderTime(timeFor(1)),id+':on')],
+     [reminderButton('‹ Локації','menu')],
+    ];
+    if(target.owner!==sub)rows.splice(2,0,[reminderButton('Видалити локацію',id+':remove')]);
+   }else{
+    const key=target.keys[before];
+    const current=timeFor(before);
+    const prefix=id+':'+tab+':';
+    if(change==='custom'){
+     const event=before===0?'відключення':'відновлення';
+     const prompt=`${target.name} · до ${event}\nВведіть хвилини через кому, наприклад 60, 15.`;
+     sub.reminderInput={id,tab,prompt};
+     message(chat,prompt,{replyMarkup:{force_reply:true,input_field_placeholder:'60, 15'}});
+     return;
+    }
+    if(change==='clear')target.owner[key]=[];
+    else if(change==='inherit'&&id!=='all')delete target.owner[key];
+    else if(/^(5|15|30|60|120)$/.test(change??'')){
+     const value=Number(change);
+     if(!current.includes(value)&&current.length===10)
+      return message(chat,'Можна вибрати до 10 нагадувань.');
+     target.owner[key]=current.includes(value)?current.filter(minutes=>minutes!==value):sortedMinutes([...current,value]);
+    }
+    const options=[5,15,30,60,120].map(value=>reminderButton(`${timeFor(before).includes(value)?'✓ ':''}${value} хв`,prefix+value));
+    text+=`\n${before===0?'До відключення':'До відновлення'} · ${reminderTime(timeFor(before))}`;
+    if(id!=='all'&&target.owner[key]==null)text+=' (як для всіх)';
+    text+='\nНатисніть, щоб додати або прибрати час. Зміни зберігаються одразу.';
+    rows=[options.slice(0,3),options.slice(3),[reminderButton('Свій час',prefix+'custom'),reminderButton('Вимкнути',prefix+'clear')]];
+    if(id!=='all')rows.push([reminderButton('Як для всіх',prefix+'inherit')]);
+    rows.push([reminderButton('‹ Тип нагадування',id)]);
+   }
+  }
+  const replyMarkup={inline_keyboard:rows};
+  if(messageId!=null)enqueue({type:'edit',chat,messageId,text,replyMarkup});
+  else message(chat,text,{replyMarkup});
+ }
  function reminderSettings(chat,subscription,command,args) {
   const places=subscription.reminderPlaces??=[];
   if(command==='/reminder_add'){
@@ -96,27 +191,18 @@ export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,pu
    if(Number.isInteger(index)&&index>=0&&index<places.length)places.splice(index,1);
   }else if(args.length){
    const value=args[0];
-   const minutes=value==='off'||value==='0'?[]:value==='default'?null:minutesList(value.split(',').map(Number));
+   const minutes=value==='off'||value==='0'?[]:value==='default'?null:parseMinutes(value);
    const index=args[1]==null?null:Number(args[1]);
-   if (args.length>2||(minutes!==null&&value!=='off'&&value!=='0'&&
-       (!/^\d{1,3}(,\d{1,3}){0,9}$/.test(value)||minutes.length!==value.split(',').length))||
+   if (args.length>2||(minutes===null&&value!=='default')||
        (minutes===null&&index===null)|| (index!==null&&(!Number.isInteger(index)||index<0||index>places.length))){
     message(chat,'Вкажіть до 10 значень від 1 до 180 через кому, off або default для окремої локації.');return;
    }
    const restore=command==='/restore';
-   const sorted=minutes===null?null:[...new Set(minutes)].sort((a,b)=>b-a);
-   if(index===null)subscription[restore?'restorationLead':'reminderLead']=sorted;
-   else if(index===0)subscription[restore?'primaryRestore':'primaryLead']=sorted;
-   else places[index-1][restore?'restore':'lead']=sorted;
+   if(index===null)subscription[restore?'restorationLead':'reminderLead']=minutes;
+   else if(index===0)subscription[restore?'primaryRestore':'primaryLead']=minutes;
+   else places[index-1][restore?'restore':'lead']=minutes;
   }
-  const summary=place=>reminderTypes.map(type=>{
-   const leads=leadsFor(subscription,place,type);
-   return leads.length?`${leads.join(', ')} хв`:'вимкнено';
-  }).join(' / ');
-  message(chat,`До відключення / до відновлення\nДля всіх · ${summary({})}\n`+
-   `0 · Основна · ${summary({lead:subscription.primaryLead,restore:subscription.primaryRestore})}\n`+
-   places.map((place,i)=>`${i+1} · ${place.name} · ${regionNames[place.region]} · ${place.group} · ${summary(place)}\n`).join('')+
-   '\n/reminder 60,15 — до відключення для всіх\n/restore 30,5 1 — до відновлення для локації 1\n/reminder off 1 — вимкнути для локації 1\n/reminder default 1 — як для всіх\n/reminder_add Назва | регіон | черга\n/reminder_remove 1');
+  reminderMenu(chat,subscription,command==='/restore'&&!args.length?'all:on':'menu');
  }
  async function tickReminders(){
   await locked(async()=>{
@@ -302,7 +388,35 @@ export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,pu
       notificationSettings(key,subscription,text,incoming.message_id);
      } else if(command==='/notifications') {
       notificationSettings(key,subscription);
+     } else if(update.callback_query&&text.startsWith('rem:')) {
+      delete subscription.reminderInput;
+      reminderMenu(key,subscription,text.slice(4),incoming.message_id);
+     } else if(update.message&&subscription.reminderInput&&incoming.reply_to_message?.from?.is_bot&&
+         incoming.reply_to_message.text===subscription.reminderInput.prompt) {
+      const {id,tab,prompt,region,group}=subscription.reminderInput;
+      const target=reminderTarget(subscription,id);
+      const minutes=parseMinutes(text);
+      if(region&&(subscription.reminderPlaces?.length??0)<12&&text.length<=40){
+       const place={id:randomUUID(),name:text,region,group};
+       (subscription.reminderPlaces??=[]).push(place);
+       delete subscription.reminderInput;
+       reminderMenu(key,subscription,place.id);
+      }else if(region&&text.length>40){
+       subscription.reminderInput.prompt='Введіть назву до 40 символів.';
+       message(key,subscription.reminderInput.prompt,{replyMarkup:{force_reply:true}});
+      }else if(target&&minutes){
+       target.owner[target.keys[tab==='off'?0:1]]=minutes;
+       delete subscription.reminderInput;
+       reminderMenu(key,subscription,id+':'+tab);
+      }else if(target){
+       subscription.reminderInput.prompt='Вкажіть до 10 значень від 1 до 180 через кому.\n'+prompt.split('\n')[0];
+       message(key,subscription.reminderInput.prompt,{replyMarkup:{force_reply:true}});
+      }else {
+       delete subscription.reminderInput;
+       reminderMenu(key,subscription);
+      }
      } else if(['/reminder','/restore','/reminder_add','/reminder_remove'].includes(command)) {
+      delete subscription.reminderInput;
       reminderSettings(key,subscription,command,args);
      } else if(command==='/address') {
       const [city,street,house]=args.join(' ').split('|').map(value=>value.trim());

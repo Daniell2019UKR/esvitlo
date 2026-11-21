@@ -52,6 +52,32 @@ test('reminders follow per-location settings, skip continuations and survive res
  assert.match(messages[0].payload.text,/Основна.*1\.1\n.*19:30/);
 });
 
+test('reminder menu toggles times, accepts a custom reply and inherits per location',async t=>{
+ const f=await setup(t);
+ const click=(id,data)=>({update_id:id,callback_query:{id:'rem-'+id,data:'rem:'+data,
+  message:{chat:{id:42,type:'private'},message_id:77}}});
+ const step=async(...updates)=>{f.setUpdates(updates);await f.bot.pollOnce({timeout:0});};
+ const sub=async()=>JSON.parse(await readFile(join(f.dir,'telegram.json'),'utf8')).subscriptions[42];
+ await step(incoming(1,'/reminder'),click(2,'all:off:60'),click(3,'all:off:15'),click(4,'home:on:custom'));
+ const prompt=f.calls.findLast(call=>call.method==='sendMessage'&&call.payload.reply_markup?.force_reply).payload.text;
+ const reply=incoming(5,'20, 7');
+ reply.message.reply_to_message={text:prompt,from:{is_bot:true}};
+ await step(reply);
+ assert.deepEqual((await sub()).reminderLead,[60,15]);
+ assert.deepEqual((await sub()).primaryRestore,[20,7]);
+ await step(click(6,'home:on:inherit'),click(7,'all:off:15'),click(8,'add:k:2.1'));
+ assert.equal((await sub()).primaryRestore,undefined);
+ assert.deepEqual((await sub()).reminderLead,[60]);
+ const name=incoming(9,'Робота');
+ name.message.reply_to_message={text:(await sub()).reminderInput.prompt,from:{is_bot:true}};
+ await step(name);
+ const [place]=(await sub()).reminderPlaces;
+ assert.equal(place.name,'Робота');
+ assert.equal(place.group,'2.1');
+ await step(click(10,place.id+':remove:yes'));
+ assert.deepEqual((await sub()).reminderPlaces,[]);
+});
+
 test('address lookup suggests a queue without changing the saved subscription until confirmed',async t=>{
  const f=await setup(t,{lookupAddress:async()=>({groups:['2.1']})});
  f.setUpdates([incoming(1,'/group 1.1'),incoming(2,'/address Місто | Вулиця | 1')]);
