@@ -50,7 +50,7 @@ function notificationKeyboard(subscription){
  })};
 }
 
-export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,lookupOutage,publicUrl='',fetchImpl=fetch,renderImage=renderScheduleImage,now=()=>new Date(),chatIds=process.env.TELEGRAM_CHAT_IDS||'',initialGroups=process.env.TELEGRAM_GROUPS||'',identityRetryMs=60000,defaultRegion='o'}) {
+export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,lookupOutage,audit,publicUrl='',fetchImpl=fetch,renderImage=renderScheduleImage,now=()=>new Date(),chatIds=process.env.TELEGRAM_CHAT_IDS||'',initialGroups=process.env.TELEGRAM_GROUPS||'',identityRetryMs=60000,defaultRegion='o'}) {
  if(!token) return {enabled:false,getUsername:()=>null,start(){},async stop(){},async notify(){},async flush(){},async pollOnce(){}};
  await mkdir(dataDir,{recursive:true});
  const path=join(dataDir,'telegram.json');
@@ -83,7 +83,17 @@ export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,lo
  }
  const regionKeyboard={inline_keyboard:Object.entries(regionNames).map(([code,name])=>[{text:name,callback_data:'region:'+code}])};
  const link=publicUrl?`\n${publicUrl}`:'';
- const enqueue=event=>state.queue.push({id:randomUUID(),attempts:0,createdAt:now().toISOString(),...event});
+ const traceDelivery=(status,event,extra)=> {
+  if(event.notificationType)audit?.('telegram_notification',{status,id:event.id,pollId:event.pollId,
+   type:event.notificationType,region:event.regionNotice??event.region??event.reminder?.region,
+   date:event.day?.date,groups:event.selectedGroups??(event.reminder?[event.reminder.group]:undefined),
+   attempt:event.attempts+1,...extra});
+ };
+ const enqueue=event=>{
+  const item={id:randomUUID(),attempts:0,createdAt:now().toISOString(),...event};
+  state.queue.push(item);
+  traceDelivery('queued',item);
+ };
  const message=(chat,text,extra={})=>enqueue({type:'message',chat,text,...extra});
  function reminderPlaces(subscription) {
   const region=regionOf(subscription);
@@ -232,11 +242,11 @@ export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,lo
   });
   await flush();
  }
- function photo(chat,day,before,snapshot,selectedGroups,caption,notificationType) {
+ function photo(chat,day,before,snapshot,selectedGroups,caption,notificationType,pollId) {
   if(selectedGroups.length&&!selectedGroups.some(group=>Object.hasOwn(day.groups,group)))return false;
   enqueue({type:'photo',chat,day:clone(day),previousDay:before?clone(before):null,
    selectedGroups:[...selectedGroups],region:snapshot?.region||unwrap(snapshot)?.region||'o',
-   emergency:clone(alertOf(snapshot)),notificationType,caption:`${caption}${link}`});
+   emergency:clone(alertOf(snapshot)),notificationType,pollId,caption:`${caption}${link}`});
   return true;
  }
  async function api(method,payload,{multipart=false,timeout=35000}={}) {
@@ -470,7 +480,7 @@ export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,lo
    await persist();
   });
  }
- async function notify(oldSnapshot,nextSnapshot) {
+ async function notify(oldSnapshot,nextSnapshot,pollId) {
   await locked(async()=>{
    const old=unwrap(oldSnapshot),next=unwrap(nextSnapshot);
    const dates=scheduleDates(now());
@@ -483,7 +493,7 @@ export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,lo
     const changedNotice=oldAlert.kind!==nextAlert.kind||oldAlert.key!==nextAlert.key;
     if(nextAlert.active===true&&(oldAlert.active!==true||changedNotice)||nextAlert.active===false&&oldAlert.active===true) {
      const alert=alertOf(nextSnapshot);
-     message(chat,alert?.active?`⚠ ${outageHeading(nextAlert.kind)} · ${regionNames[region]}\n${nextAlert.text||'Оператор повідомив про відключення.'}${link}`:`Оператор зняв попередження: ${outageHeading(oldAlert.kind).toLowerCase()} · ${regionNames[region]}. Стан за адресою перевіряйте в оператора.${link}`,{regionNotice:region,notificationType:alert?.active?noticeType(nextAlert.kind):'clearance'});
+     message(chat,alert?.active?`⚠ ${outageHeading(nextAlert.kind)} · ${regionNames[region]}\n${nextAlert.text||'Оператор повідомив про відключення.'}${link}`:`Оператор зняв попередження: ${outageHeading(oldAlert.kind).toLowerCase()} · ${regionNames[region]}. Стан за адресою перевіряйте в оператора.${link}`,{regionNotice:region,notificationType:alert?.active?noticeType(nextAlert.kind):'clearance',pollId});
     }
     if(subscription.groups===null)continue;
     for(const day of next?.days||[]) {
@@ -496,7 +506,7 @@ export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,lo
      const caption=day.date===dates[1]&&!before
       ?`⚡ Додано графік на ${date} · ${regionNames[region]}`
       :`⚡ Графік оновлено · ${regionNames[region]} · ${date}\nЗмінилися черги: ${changed.join(', ')}`;
-     photo(chat,day,before,nextSnapshot,subscription.groups,caption,day.date===dates[1]&&!before?'publication':'schedule');
+     photo(chat,day,before,nextSnapshot,subscription.groups,caption,day.date===dates[1]&&!before?'publication':'schedule',pollId);
     }
    }
    await persist();
@@ -508,10 +518,10 @@ export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,lo
    const sub=state.subscriptions[event.chat], r=event.reminder, instant=now();
    if(!sub?.enabled||!reminderPlaces(sub).some(p=>(p.id??null)===(r.id??null)&&p.region===r.region&&
     p.group===r.group&&leadsFor(sub,p,event.notificationType).includes(r.lead))||
-    dueOutage(getSnapshot(r.region),r.group,r.lead,instant,event.notificationType==='restoration')?.start!==r.start)return;
+    dueOutage(getSnapshot(r.region),r.group,r.lead,instant,event.notificationType==='restoration')?.start!==r.start)return false;
   }
   const mode=event.notificationType?notificationMode(state.subscriptions[event.chat],event.notificationType):'sound';
-  if(mode==='off')return;
+  if(mode==='off')return false;
   if(event.type==='callback')return api('answerCallbackQuery',{callback_query_id:event.callbackId,...(event.text?{text:event.text,show_alert:true}:{})});
   if(event.type==='edit')return api('editMessageText',{chat_id:event.chat,message_id:event.messageId,text:event.text,reply_markup:event.replyMarkup});
   if(event.type==='message')return api('sendMessage',{chat_id:event.chat,text:event.text.slice(0,4096),...(mode==='silent'?{disable_notification:true}:{}),...(event.replyMarkup?{reply_markup:event.replyMarkup}:{})});
@@ -529,9 +539,11 @@ export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,lo
     // A concurrent /stop or /group may have removed a queued image.
     if(!await locked(()=>state.queue.some(item=>item.id===event.id)))continue;
     try {
-     await send(event);
+     const result=await send(event);
+     traceDelivery(result===false?'skipped':'accepted',event);
      await locked(async()=>{state.queue=state.queue.filter(item=>item.id!==event.id);await persist();});
     } catch(error) {
+     traceDelivery(error.code===403?'blocked':'failed',event,{code:Number.isInteger(error.code)?error.code:'unknown'});
      await locked(async()=>{
       const item=state.queue.find(item=>item.id===event.id);if(!item)return;
       if(error.code===403) {

@@ -1,6 +1,6 @@
 import http from 'node:http';
 import {readFile,mkdir,writeFile,rename} from 'node:fs/promises';
-import {createHash} from 'node:crypto';
+import {createHash,randomUUID} from 'node:crypto';
 import {isIP} from 'node:net';
 import {scrape,mergeSchedules,mergeDtekSchedules} from './schedule.js';
 import {shutdownsPages} from './vendor/constants.js';
@@ -24,7 +24,8 @@ if(!Number.isFinite(dtekIntervalSeconds)||dtekIntervalSeconds<30||dtekIntervalSe
 const retrySeconds=Number(process.env.VPN_RETRY_SECONDS||60);
 if(!Number.isFinite(retrySeconds)||retrySeconds<10)throw Error('VPN_RETRY_SECONDS must be at least 10');
 const dir=process.env.DATA_DIR||'./data';
-const sendPush=createPush(dir);
+const audit=process.env.DETAILED_LOGGING==='1'?(event,fields)=>console.info(JSON.stringify({event,...fields})):undefined;
+const sendPush=createPush(dir,audit);
 await mkdir(dir,{recursive:true});
 const empty=()=>({current:null,previous:null,checkedAt:null,lastSuccess:null,error:null,emergency:{active:null,message:null,areas:[],checkedAt:null,stale:true}});
 const states=new Map();
@@ -57,13 +58,17 @@ function snapshot(region=defaultRegion){
  return {current,previous,checkedAt,lastSuccess,error,emergency,region,source:regionalSources[region],dataSource:current?.dataSource??regionalSources[region],telegramEnabled:Boolean(telegram?.enabled),telegramUsername:telegram?.getUsername()||null,
  api:{endpoint:'/api/v1/schedules',refreshIntervalSeconds:intervalFor(region),nextRefreshAt:refreshTimes.get(region)??null}};
 }
-telegram=await createTelegram({token:process.env.TELEGRAM_BOT_TOKEN,dataDir:dir,defaultRegion,getSnapshot:snapshot,lookupAddress,lookupOutage,publicUrl:process.env.PUBLIC_URL||''});
+telegram=await createTelegram({token:process.env.TELEGRAM_BOT_TOKEN,dataDir:dir,defaultRegion,getSnapshot:snapshot,lookupAddress,lookupOutage,audit,publicUrl:process.env.PUBLIC_URL||''});
 telegram.start();
 
 async function poll(region){
  const state=states.get(region);
  const selector=selectors.get(region);
  const oldSnapshot=snapshot(region);
+ const pollId=audit?randomUUID():undefined;
+ const started=Date.now();
+ const trace=(event,fields)=>audit?.(event,{pollId,region,...fields});
+ trace('poll_started',{});
  let noticeRead=false;
  try{
   let next,routeName='regional';
@@ -72,15 +77,17 @@ async function poll(region){
    routeName=route.name;
    try{next=await scrape(region,{proxyUrl:route.proxyUrl});}
    catch{
+    trace('source_failed',{route:route.name});
     selector.failed(route);
     if(route.name==='vpn'){
-     try{next=await scrape(region);routeName='direct';}catch{/* Try the regional feed below. */}
+     try{next=await scrape(region);routeName='direct';}catch{trace('source_failed',{route:'direct'});}
     }
    }
   }
   const dates=scheduleDates();
   let noticeRoute=routeName;
   if(!next?.days.some(day=>dates.includes(day.date))){
+   trace('regional_fallback',{route:routeName,officialDates:next?.days.map(day=>day.date)??[]});
    const regional=await scrapeRegional(region);
    const useOfficial=next?.emergency.active!=null;
    next={...regional,emergency:useOfficial?next.emergency:regional.emergency};
@@ -92,6 +99,12 @@ async function poll(region){
   const priorNotice=state.emergency;
   const priorCandidate=state.emergencyCandidate;
   const notice=confirmEmergency(priorNotice,priorCandidate,next.emergency,state.checkedAt);
+  trace('notice_checked',{route:noticeRoute,sourceUpdatedAt:next.sourceUpdatedAt,
+   input:{active:next.emergency.active,kind:next.emergency.kind??null,areas:next.emergency.areas,
+    text:next.emergency.message?.slice(0,1000)??null},
+   output:{active:notice.emergency.active,kind:notice.emergency.kind??null,stale:notice.emergency.stale},
+   decision:notice.candidate?'pending':notice.emergency.stale?'unconfirmed':
+    priorNotice.active!==notice.emergency.active||priorNotice.message!==notice.emergency.message?'changed':'unchanged'});
   state.emergency=notice.emergency;state.emergencyCandidate=notice.candidate;
   if ((notice.candidate&&notice.candidate.signature!==priorCandidate?.signature)||
       priorNotice.active!==notice.emergency.active||priorNotice.message!==notice.emergency.message) {
@@ -100,10 +113,21 @@ async function poll(region){
   }
   if(next.days.length){
    const revision=selector?mergeDtekSchedules(next,state.current):null;
+   if(audit)trace('schedule_checked',{route:routeName,source:next.dataSource??'dtek',sourceUpdatedAt:next.sourceUpdatedAt,
+    published:next.days.map(day=>({date:day.date,hash:hash(day.groups)})),rejected:revision?.rejected??[]});
    if(revision?.rejected.length)console.info(JSON.stringify({event:'schedule_revision_rejected',region,route:routeName,revisions:revision.rejected}));
    Object.assign(next,revision?.schedule??mergeSchedules(next.days,state.current?.days));
    delete next.emergency;next.region=region;
    if(hash(next.days)!==hash(state.current?.days)){
+    if(audit)trace('schedule_diff',{days:next.days.map(day=>{
+     const previous=state.current?.days.find(value=>value.date===day.date)?.groups??{};
+     const encode=slots=>slots?.map(slot=>slot===null?'?':slot?'1':'0').join('')??null;
+     const groups=[...new Set([...Object.keys(previous),...Object.keys(day.groups)])].flatMap(group=>{
+      const before=encode(previous[group]),after=encode(day.groups[group]);
+      return before===after?[]:[{group,before,after}];
+     });
+     return {date:day.date,groups};
+    })});
     if(selector)console.info(JSON.stringify({event:'schedule_updated',region,route:routeName,source:next.dataSource??'dtek',
      sourceUpdatedAt:next.sourceUpdatedAt,dates:next.days.map(day=>day.date)}));
     state.previous=state.current;state.current={...next,receivedAt:state.checkedAt};
@@ -121,8 +145,10 @@ async function poll(region){
  }
  await save(region);
  const nextSnapshot=snapshot(region);
- await Promise.all([telegram.notify(oldSnapshot,nextSnapshot),
-  sendPush(oldSnapshot,nextSnapshot,regionNames[region]).catch(()=>console.warn('FCM publication failed.'))]);
+ trace('poll_finished',{durationMs:Date.now()-started,lastSuccess:state.lastSuccess,
+  storedVersion:state.current?.sourceUpdatedAt??null,retainedDates:state.current?.retainedDates??[],error:state.error});
+ await Promise.all([telegram.notify(oldSnapshot,nextSnapshot,pollId),
+  sendPush(oldSnapshot,nextSnapshot,regionNames[region],pollId).catch(()=>console.warn('FCM publication failed.'))]);
 }
 
 const files=Object.assign(Object.create(null),{'/':'index.html','/style.css':'style.css','/app.js':'app.js','/dates.js':'dates.js','/regions.js':'regions.js'});

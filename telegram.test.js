@@ -35,6 +35,19 @@ test('regional alerts and graph requests stay within the selected region',async 
  assert.deepEqual(f.calls.filter(call=>call.method==='sendMessage').map(call=>call.payload.chat_id),['43']);
 });
 
+test('operator delivery logs correlate the poll and retry without logging recipient details',async t=>{
+ const entries=[];
+ const f=await setup(t,{audit:(name,fields)=>entries.push({name,...fields})});
+ f.setUpdates([incoming(1,'/group 1.1')]);
+ await f.bot.pollOnce({timeout:0});
+ const before={...snapshot(),emergency:{active:false}};
+ await f.bot.notify(before,{...before,emergency:{active:true,kind:'emergency',message:'Текст оператора'}},'poll-test');
+ await f.bot.flush();
+ assert.deepEqual(entries.map(entry=>entry.status),['queued','accepted']);
+ assert.ok(entries.every(entry=>entry.pollId==='poll-test'&&entry.region==='o'&&entry.type==='emergency'&&entry.id===entries[0].id));
+ assert.ok(entries.every(entry=>!('chat' in entry)&&!('text' in entry)));
+});
+
 test('reminders follow per-location settings, skip continuations and survive restart without duplicates',async t=>{
  const instant=new Date('2026-11-13T17:15:15Z'); // 19:15 Kyiv
  const monitor=day();

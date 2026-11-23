@@ -4,6 +4,8 @@ services:
       com.centurylinklabs.watchtower.enable: "false"
     volumes:
       - ${DTEK_DATA_PATH:?Set DTEK_DATA_PATH to the host data directory}:/app/data
+    environment:
+      DETAILED_LOGGING: "${DETAILED_LOGGING:-1}"
     logging:
       driver: json-file
       options:

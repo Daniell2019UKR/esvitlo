@@ -62,18 +62,23 @@ function watchAndroidReleases(messaging,dir){
  setTimeout(check,15000).unref();
 }
 
-export function createPush(dataDir){
+export function createPush(dataDir,audit){
  if(!process.env.FCM_PROJECT_ID)return async()=>{};
  const app=initializeApp({credential:applicationDefault(),projectId:process.env.FCM_PROJECT_ID},'esvitlo-push');
  const messaging=getMessaging(app);
  if(dataDir)watchAndroidReleases(messaging,dataDir);
- return async(before,after,title)=>{
+ return async(before,after,title,pollId)=>{
   const events=pushEvents(before,after);
   for(let offset=0;offset<events.length;offset+=8){
-   const results=await Promise.allSettled(events.slice(offset,offset+8).map(({topic,region,group,body,type})=>messaging.send({
+   const batch=events.slice(offset,offset+8);
+   const results=await Promise.allSettled(batch.map(({topic,region,group,body,type})=>messaging.send({
     topic,data:{title,type,body:body.slice(0,800),region,...(group?{group}:{})},
     android:{priority:'high',ttl:30*60*1000}
    })));
+   if(audit)results.forEach((result,i)=>{
+    const {region,group,type}=batch[i];
+    audit('fcm_notification',{pollId,region,group,type,status:result.status==='fulfilled'?'accepted':'failed'});
+   });
    if(results.some(result=>result.status==='rejected'))console.warn('FCM delivery failed for one or more topics.');
   }
  };
