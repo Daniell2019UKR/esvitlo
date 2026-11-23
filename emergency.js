@@ -59,9 +59,28 @@ export function extractEmergency(html) {
  if(typeof html!=='string'||!html.trim())return unknown;
  const attention=attentionText(html);
  if(attention.found&&!attention.finished)return unknown;
+ if(attention.found&&!attention.text.trim())return unknown;
  const recognized=/DisconSchedule\.fact\s*=\s*\{/.test(html)||(/class=["'][^"']*discon_schedule/.test(html)&&/MicroModal\.show\(['"]modal-attention['"]\)/.test(html));
  if(!attention.found)return recognized?{active:false,message:null,areas:[]}:unknown;
  return classifyEmergency(attention.text);
+}
+
+function noticeSignature(notice) {
+ if(notice?.active!==true)return notice?.active===false?'clear':null;
+ const text=(notice.message??'').normalize('NFC').replace(/[\u00ad\u200b-\u200f\u2060\ufeff]/gu,'')
+  .trim().replace(/\s*[—–-]\s*сайт\s+дтек\.?$/iu,'').replace(/[«»“”"]/gu,'')
+  .replace(/\s+/gu,' ').trim().replace(/[.!?]+$/u,'').toLocaleLowerCase('uk');
+ return JSON.stringify([notice.kind??'emergency',text]);
+}
+
+export function confirmEmergency(current, candidate, incoming, checkedAt) {
+ const signature=noticeSignature(incoming);
+ if(signature===null)return {emergency:{...current,stale:true},candidate:null};
+ if(signature===noticeSignature(current))return {
+  emergency:{...current,checkedAt,stale:false},candidate:null
+ };
+ if(candidate?.signature===signature)return {emergency:{...incoming,checkedAt,stale:false},candidate:null};
+ return {emergency:{...current,stale:true},candidate:{signature}};
 }
 
 export function classifyEmergency(message) {

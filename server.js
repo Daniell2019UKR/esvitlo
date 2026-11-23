@@ -2,7 +2,7 @@ import http from 'node:http';
 import {readFile,mkdir,writeFile,rename} from 'node:fs/promises';
 import {createHash} from 'node:crypto';
 import {isIP} from 'node:net';
-import {scrape,mergeSchedules} from './schedule.js';
+import {scrape,mergeSchedules,mergeDtekSchedules} from './schedule.js';
 import {shutdownsPages} from './vendor/constants.js';
 import {schedulesResponse} from './api.js';
 import {createTransportSelector} from './transport.js';
@@ -12,12 +12,15 @@ import {regionalSources,scrapeRegional} from './regional-sources.js';
 import {scheduleDates} from './public/dates.js';
 import {createPush} from './push.js';
 import {addressRegions,lookupAddress,outageRegions,lookupOutage} from './address-lookup.js';
+import {confirmEmergency} from './emergency.js';
 
 const defaultRegion=process.env.REGION||'o';
 const regions=Object.keys(regionNames);
 if(!isRegion(defaultRegion))throw Error('Unknown REGION');
 const intervalSeconds=Number(process.env.POLL_INTERVAL_SECONDS||120);
 if(!Number.isFinite(intervalSeconds)||intervalSeconds<30||intervalSeconds>3600)throw Error('POLL_INTERVAL_SECONDS must be between 30 and 3600');
+const dtekIntervalSeconds=Number(process.env.DTEK_POLL_INTERVAL_SECONDS||300);
+if(!Number.isFinite(dtekIntervalSeconds)||dtekIntervalSeconds<30||dtekIntervalSeconds>3600)throw Error('DTEK_POLL_INTERVAL_SECONDS must be between 30 and 3600');
 const retrySeconds=Number(process.env.VPN_RETRY_SECONDS||60);
 if(!Number.isFinite(retrySeconds)||retrySeconds<10)throw Error('VPN_RETRY_SECONDS must be at least 10');
 const dir=process.env.DATA_DIR||'./data';
@@ -45,13 +48,14 @@ async function save(region){
 }
 const hash=value=>createHash('sha256').update(JSON.stringify(value??null)).digest('hex');
 const selectors=new Map(Object.keys(shutdownsPages).map(region=>[region,createTransportSelector({proxyUrl:process.env.DTEK_PROXY_URL,healthUrl:process.env.DTEK_PROXY_HEALTH_URL,retrySeconds})]));
+const intervalFor=region=>selectors.has(region)?dtekIntervalSeconds:intervalSeconds;
 const refreshTimes=new Map();
 let telegram;
 function snapshot(region=defaultRegion){
  const state=states.get(region);
  const {current,previous,checkedAt,lastSuccess,error,emergency}=state;
  return {current,previous,checkedAt,lastSuccess,error,emergency,region,source:regionalSources[region],dataSource:current?.dataSource??regionalSources[region],telegramEnabled:Boolean(telegram?.enabled),telegramUsername:telegram?.getUsername()||null,
- api:{endpoint:'/api/v1/schedules',refreshIntervalSeconds:intervalSeconds,nextRefreshAt:refreshTimes.get(region)??null}};
+ api:{endpoint:'/api/v1/schedules',refreshIntervalSeconds:intervalFor(region),nextRefreshAt:refreshTimes.get(region)??null}};
 }
 telegram=await createTelegram({token:process.env.TELEGRAM_BOT_TOKEN,dataDir:dir,defaultRegion,getSnapshot:snapshot,lookupAddress,lookupOutage,publicUrl:process.env.PUBLIC_URL||''});
 telegram.start();
@@ -62,41 +66,57 @@ async function poll(region){
  const oldSnapshot=snapshot(region);
  let noticeRead=false;
  try{
-  let next;
+  let next,routeName='regional';
   if(selector){
    const route=await selector.take();
+   routeName=route.name;
    try{next=await scrape(region,{proxyUrl:route.proxyUrl});}
    catch{
     selector.failed(route);
     if(route.name==='vpn'){
-     try{next=await scrape(region);}catch{/* Try the regional feed below. */}
+     try{next=await scrape(region);routeName='direct';}catch{/* Try the regional feed below. */}
     }
    }
   }
   const dates=scheduleDates();
+  let noticeRoute=routeName;
   if(!next?.days.some(day=>dates.includes(day.date))){
    const regional=await scrapeRegional(region);
-   next={...regional,emergency:next?.emergency.active===true?next.emergency:
-    regional.emergency.active===true?regional.emergency:next?.emergency??regional.emergency};
+   const useOfficial=next?.emergency.active!=null;
+   next={...regional,emergency:useOfficial?next.emergency:regional.emergency};
+   routeName='regional';
+   if(!useOfficial)noticeRoute=routeName;
   }
   state.checkedAt=new Date().toISOString();
   noticeRead=next.emergency.active!==null;
-  if(next.emergency.active!==null)state.emergency={...next.emergency,checkedAt:state.checkedAt,stale:false};
-  else state.emergency={...state.emergency,stale:true};
+  const priorNotice=state.emergency;
+  const priorCandidate=state.emergencyCandidate;
+  const notice=confirmEmergency(priorNotice,priorCandidate,next.emergency,state.checkedAt);
+  state.emergency=notice.emergency;state.emergencyCandidate=notice.candidate;
+  if ((notice.candidate&&notice.candidate.signature!==priorCandidate?.signature)||
+      priorNotice.active!==notice.emergency.active||priorNotice.message!==notice.emergency.message) {
+   console.info(JSON.stringify({event:notice.candidate?'operator_notice_pending':'operator_notice_confirmed',
+    region,route:noticeRoute,active:next.emergency.active,kind:next.emergency.kind??null}));
+  }
   if(next.days.length){
-   Object.assign(next,mergeSchedules(next.days,state.current?.days));
+   const revision=selector?mergeDtekSchedules(next,state.current):null;
+   if(revision?.rejected.length)console.info(JSON.stringify({event:'schedule_revision_rejected',region,route:routeName,revisions:revision.rejected}));
+   Object.assign(next,revision?.schedule??mergeSchedules(next.days,state.current?.days));
    delete next.emergency;next.region=region;
    if(hash(next.days)!==hash(state.current?.days)){
+    if(selector)console.info(JSON.stringify({event:'schedule_updated',region,route:routeName,source:next.dataSource??'dtek',
+     sourceUpdatedAt:next.sourceUpdatedAt,dates:next.days.map(day=>day.date)}));
     state.previous=state.current;state.current={...next,receivedAt:state.checkedAt};
    }else{
-    state.current.sourceUpdatedAt=next.sourceUpdatedAt;state.current.retainedDates=next.retainedDates;state.current.dataSource=next.dataSource;
+    state.current={...next,receivedAt:state.current.receivedAt};
    }
-   state.lastSuccess=state.checkedAt;state.error=null;
+   if(!revision||revision.accepted){state.lastSuccess=state.checkedAt;state.error=null;}
+   else state.error='Джерело не підтвердило актуальність графіка. Показуємо останній збережений графік.';
   }else state.error='Актуальний плановий графік недоступний. Якщо є збережені дані, показуємо їх.';
  }catch{
   state.checkedAt=new Date().toISOString();
   state.error='Не вдалося отримати графік відключень.';
-  if(!noticeRead)state.emergency={...state.emergency,stale:true};
+  if(!noticeRead){state.emergency={...state.emergency,stale:true};state.emergencyCandidate=null;}
   console.error(`Schedule fetch failed for ${region}; saved schedules preserved.`);
  }
  await save(region);
@@ -240,10 +260,11 @@ function schedulePoll(region,delay){
  refreshTimes.set(region,new Date(Date.now()+delay).toISOString());
  timers.set(region,setTimeout(()=>{
   const started=Date.now();
-  refreshTimes.set(region,new Date(started+intervalSeconds*1000).toISOString());
+  const interval=intervalFor(region)*1000;
+  refreshTimes.set(region,new Date(started+interval).toISOString());
   const task=poll(region).catch(()=>console.error('Polling failed for '+region)).finally(()=>{
    inFlight.delete(task);
-   schedulePoll(region,Math.max(1000,intervalSeconds*1000-(Date.now()-started)));
+   schedulePoll(region,Math.max(1000,interval-(Date.now()-started)));
   });
   inFlight.add(task);
  },delay));

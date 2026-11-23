@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {normalize, mergeSchedules, scrape} from './schedule.js';
+import {normalize, mergeSchedules, mergeDtekSchedules, scrape} from './schedule.js';
 import {scheduleDates, currentSlot, outageHours} from './public/dates.js';
 import {scrapeRegional} from './regional-sources.js';
 test('DTEK half-hour states and unknown hours',()=>{
@@ -41,6 +41,41 @@ const twoDays = () => normalize({data:{
  [timestamp('2026-11-14')]:rawDay('no'),
  [timestamp('2026-11-13')]:rawDay('yes')
 }});
+
+test('DTEK ignores an older mirror across polls and keeps a new independently published date',()=>{
+ const [today,tomorrow]=twoDays();
+ const changed={...today,groups:{...today.groups,'1.1':Array(48).fill(false)}};
+ const official={days:[changed],sourceUpdatedAt:'13.11.2026 15:59'};
+ const mirror={days:[today,tomorrow],sourceUpdatedAt:'13.11.2026 12:49',dataSource:'mirror'};
+ const fallback=mergeDtekSchedules(mirror,official,evening);
+ assert.equal(fallback.accepted,1);
+ assert.deepEqual(fallback.schedule.days,[changed,tomorrow]);
+ assert.deepEqual(fallback.schedule.retainedDates,[today.date]);
+ assert.equal(fallback.schedule.revisions[tomorrow.date].sourceUpdatedAt,mirror.sourceUpdatedAt);
+ assert.equal(fallback.schedule.sourceUpdatedAt,official.sourceUpdatedAt);
+ const recovered=mergeDtekSchedules(official,fallback.schedule,evening);
+ assert.deepEqual(recovered.schedule.days,fallback.schedule.days);
+ assert.equal(recovered.accepted,1);
+ assert.deepEqual(mergeDtekSchedules(mirror,recovered.schedule,evening).schedule.days,[changed,tomorrow]);
+});
+
+test('DTEK ignores conflicting equal timestamps and permits a genuinely newer version',()=>{
+ const [today]=twoDays();
+ const changed={...today,groups:{'1.1':Array(48).fill(false)}};
+ const saved={days:[today],sourceUpdatedAt:'13.11.2026 15:59'};
+ for (const upstream of [
+  {sourceUpdatedAt:'2026-11-13T13:59:00Z',dataSource:'mirror'},
+  {sourceUpdatedAt:'13.11.2026 15:59'},
+  {sourceUpdatedAt:null,dataSource:'mirror'},
+  {sourceUpdatedAt:'13.11.2026 12:49'}
+ ]) {
+  const result=mergeDtekSchedules({days:[changed],...upstream},saved,evening);
+  assert.equal(result.accepted,0);
+  assert.equal(result.rejected.length,1);
+  assert.deepEqual(result.schedule.days,[today]);
+ }
+ assert.deepEqual(mergeDtekSchedules({days:[changed],sourceUpdatedAt:'13.11.2026 16:00'},saved,evening).schedule.days,[changed]);
+});
 
 test('parses today and tomorrow independently in calendar order',()=>{
  const days=twoDays();

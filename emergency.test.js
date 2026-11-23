@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {extractEmergency} from './emergency.js';
+import {confirmEmergency,extractEmergency} from './emergency.js';
 
 const page=body=>`<html><main class="discon_schedule">${body}</main><script>DisconSchedule.fact = {"data":{}}; if ($('#modal-attention').length) MicroModal.show('modal-attention');</script></html>`;
 const modal=body=>`<div id="modal-attention" class="modal" aria-hidden="true"><div class="modal__container"><h2>Увага!</h2><div class="modal__body">${body}</div><button>Закрити</button></div></div>`;
@@ -69,4 +69,23 @@ test('restored scheduled operation does not look like an active emergency declar
 test('decodes numeric entities and excludes hidden template copy',()=>{
  const result=extractEmergency(page(modal('<p>Екстрені відключення в Одесі &#8212; графіки не діють.</p><p hidden>Старий текст</p><p style="display: none">Інший район</p>')));
  assert.equal(result.message,'Увага! Екстрені відключення в Одесі — графіки не діють.');
+});
+test('operator notice changes and clearances require two matching reads',()=>{
+ const now='2026-11-23T14:00:00Z';
+ const active={active:true,kind:'emergency',message:'В Одесі діють екстрені відключення.',areas:[]};
+ const clear={active:false,message:null,areas:[]};
+ const hold=confirmEmergency(active,null,clear,now);
+ assert.equal(hold.emergency.active,true);
+ assert.equal(hold.emergency.stale,true);
+ assert.equal(confirmEmergency(active,hold.candidate,clear,now).emergency.active,false);
+ assert.equal(confirmEmergency(active,hold.candidate,{active:null},now).candidate,null);
+ const echo={...active,message:'«В Одесі діють екстрені відключення.» — сайт ДТЕК'};
+ const same=confirmEmergency(active,hold.candidate,echo,now);
+ assert.equal(same.emergency.message,active.message);
+ assert.equal(same.emergency.stale,false);
+ assert.equal(same.candidate,null);
+ const unplanned={active:true,kind:'unplanned',message:'У частині району зникло світло.'};
+ const changed=confirmEmergency(active,null,unplanned,now);
+ assert.equal(changed.emergency.kind,'emergency');
+ assert.equal(confirmEmergency(active,changed.candidate,unplanned,now).emergency.kind,'unplanned');
 });
