@@ -77,6 +77,19 @@ test('DTEK ignores conflicting equal timestamps and permits a genuinely newer ve
  assert.deepEqual(mergeDtekSchedules({days:[changed],sourceUpdatedAt:'13.11.2026 16:00'},saved,evening).schedule.days,[changed]);
 });
 
+test('an identical mirror confirms freshness without replacing the official revision',()=>{
+ const [today]=twoDays();
+ const saved={days:[today],sourceUpdatedAt:'13.11.2026 15:59',retainedDates:[today.date]};
+ const mirror={days:[today],sourceUpdatedAt:'2026-11-13T13:59:00Z',dataSource:'mirror'};
+ const result=mergeDtekSchedules(mirror,saved,evening);
+ assert.equal(result.accepted,1);
+ assert.deepEqual(result.rejected,[]);
+ assert.deepEqual(result.schedule.retainedDates,[]);
+ assert.deepEqual(result.schedule.days,saved.days);
+ assert.equal(result.schedule.sourceUpdatedAt,saved.sourceUpdatedAt);
+ assert.equal(result.schedule.dataSource,null);
+});
+
 test('parses today and tomorrow independently in calendar order',()=>{
  const days=twoDays();
  assert.deepEqual(days.map(d=>d.date),['2026-11-13','2026-11-14']);

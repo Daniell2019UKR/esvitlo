@@ -71,6 +71,10 @@ export function mergeDtekSchedules(incoming, saved, now = new Date()) {
     const older = priorTime!==null&&(incomingTime===null||incomingTime<priorTime);
     const weaker = prior.dataSource===null&&incomingRevision.dataSource!==null&&
       (incomingTime===null||priorTime===null||incomingTime===priorTime);
+    if (weaker&&priorTime!==null&&incomingTime===priorTime&&!different) {
+      revisions[day.date]=prior;
+      return true;
+    }
     const sameRevision = priorTime!==null&&incomingTime===priorTime&&
       (prior.dataSource!==null)===(incomingRevision.dataSource!==null);
     if (!older&&!weaker&&!(different&&sameRevision)) return true;
@@ -81,7 +85,7 @@ export function mergeDtekSchedules(incoming, saved, now = new Date()) {
     days:savedDays.filter(day=>dates.includes(day.date)),
     retainedDates:savedDays.filter(day=>dates.includes(day.date)).map(day=>day.date)
   };
-  for (const day of days) revisions[day.date] = retainedDates.includes(day.date) ?
+  for (const day of days) revisions[day.date] ??= retainedDates.includes(day.date) ?
     saved.revisions?.[day.date]??revisionOf(saved) : incomingRevision;
   const latest = Object.values(revisions).sort((a,b)=>(revisionTime(b.sourceUpdatedAt)??0)-
     (revisionTime(a.sourceUpdatedAt)??0)||Number(a.dataSource!==null)-Number(b.dataSource!==null))[0]??incomingRevision;
