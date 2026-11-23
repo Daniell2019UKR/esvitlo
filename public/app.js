@@ -43,6 +43,41 @@ region=isRegion(requested)?requested:isRegion(stored('region'))?stored('region')
 const regionSelect=$('#region-select');
 for(const [code,name] of Object.entries(regionNames))regionSelect.add(new Option(name,code));
 if(region)regionSelect.value=region;
+const addressPanel=$('#address-outage');
+const addressForm=$('#address-outage-form');
+const addressResult=$('#address-outage-result');
+let outageRegions=new Set();
+function showAddressPanel(){
+ addressPanel.hidden=!outageRegions.has(region);
+}
+fetch('/api/v1/regions').then(response=>response.json()).then(catalog=>{
+ outageRegions=new Set(catalog.regions.filter(item=>item.outageLookup).map(item=>item.code));
+ showAddressPanel();
+}).catch(()=>{});
+addressForm.oninput=()=>{addressResult.textContent='';addressResult.classList.remove('address-alert');};
+addressForm.onsubmit=async event=>{
+ event.preventDefault();
+ const input={...Object.fromEntries(new FormData(addressForm)),region};
+ const button=addressForm.querySelector('button');
+ button.disabled=true;
+ addressResult.classList.remove('address-alert');
+ addressResult.textContent='Перевіряємо…';
+ try{
+  const response=await fetch('/api/v1/address-outage',{method:'POST',
+   headers:{'Content-Type':'application/json'},body:JSON.stringify(input),signal:AbortSignal.timeout(15000)});
+  const result=await response.json();
+  if(region!==input.region||Object.entries(Object.fromEntries(new FormData(addressForm))).some(([key,value])=>input[key]!==value))return;
+  const messages={no_emergency:'Оператор не повідомив про аварію за цією адресою.',
+   not_found:'Оператор не знайшов цей будинок.',ambiguous:'Адреса неоднозначна. Уточніть її на сайті оператора.',
+   rate_limited:'Забагато запитів. Спробуйте трохи пізніше.'};
+  addressResult.classList.toggle('address-alert',result.status==='active');
+  addressResult.textContent=result.status==='active'?['Аварійне відключення',result.reason,
+   result.startedAt&&'Початок: '+result.startedAt,
+   result.estimatedRestoration&&'Орієнтовне відновлення: '+result.estimatedRestoration].filter(Boolean).join('\n'):
+   messages[result.status]??'Не вдалося перевірити аварії. Спробуйте пізніше.';
+ }catch{if(region===input.region&&addressResult.textContent==='Перевіряємо…')addressResult.textContent='Не вдалося перевірити аварії. Спробуйте пізніше.';}
+ finally{button.disabled=false;}
+};
 function restoreGroup(code, legacy=false,snapshot={region:code}){
  const select=$('#group');
  const groups=availableGroups(snapshot);
@@ -59,6 +94,7 @@ restoreGroup(region);
 $('#group').onchange=e=>{filter=e.target.value;favoriteList.hidden=filter!=='favorites';if(region)remember('group:'+region,filter);render();};
 regionSelect.onchange=()=>{
  region=regionSelect.value;remember('region',region);restoreGroup(region);
+ addressForm.reset();addressResult.textContent='';addressResult.classList.remove('address-alert');showAddressPanel();
  data=null;$('#chart').replaceChildren();$('#emergency').hidden=true;$('#my-group').hidden=true;
  $('#region').textContent=regionNames[region];$('#source').removeAttribute('href');
  $('#public-api').href='/api/v1/schedules?region='+region;
@@ -256,6 +292,7 @@ async function load(){
   if(version!==requestVersion)return;
   const legacy=!region;
   if(!region){region=next.region;regionSelect.value=region;}
+  showAddressPanel();
   restoreGroup(region,legacy,next);
   if(next.current?.days?.length) {
    remember('offline-schedule:'+region,JSON.stringify(next));

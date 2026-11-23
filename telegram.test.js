@@ -90,6 +90,24 @@ test('address lookup suggests a queue without changing the saved subscription un
  assert.deepEqual((await state()).subscriptions[42].groups,['2.1']);
 });
 
+test('address outage command reports the operator estimate and throttles duplicate requests',async t=>{
+ let lookups=0;
+ const f=await setup(t,{lookupOutage:async(region,input)=>{
+  assert.equal(region,'o');
+  assert.equal(input.house,'69/корп.71');
+  lookups++;
+  return {status:'active',reason:'Аварійні ремонтні роботи',estimatedRestoration:'22:25'};
+ }});
+ const command='/outage Одеса | Новосельського | 69/корп.71';
+ f.setUpdates([incoming(1,command),incoming(2,command)]);
+ await f.bot.pollOnce({timeout:0});
+ assert.equal(lookups,1);
+ assert.ok(f.calls.some(call=>call.method==='sendMessage'&&call.payload.text.includes('Орієнтовне відновлення: 22:25')));
+ assert.ok(f.calls.some(call=>call.method==='sendMessage'&&call.payload.text.includes('30 секунд')));
+ const sub=JSON.parse(await readFile(join(f.dir,'telegram.json'),'utf8')).subscriptions[42];
+ assert.ok(!JSON.stringify(sub).includes('Новосельського'));
+});
+
 test('delivers two outage leads and a silent restoration without repeats',async t=>{
  let instant=new Date('2026-11-13T16:30:15Z');
  const monitor=day();

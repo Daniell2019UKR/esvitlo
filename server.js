@@ -11,7 +11,7 @@ import {regionNames,isRegion} from './public/regions.js';
 import {regionalSources,scrapeRegional} from './regional-sources.js';
 import {scheduleDates} from './public/dates.js';
 import {createPush} from './push.js';
-import {addressRegions,lookupAddress} from './address-lookup.js';
+import {addressRegions,lookupAddress,outageRegions,lookupOutage} from './address-lookup.js';
 
 const defaultRegion=process.env.REGION||'o';
 const regions=Object.keys(regionNames);
@@ -53,7 +53,7 @@ function snapshot(region=defaultRegion){
  return {current,previous,checkedAt,lastSuccess,error,emergency,region,source:regionalSources[region],dataSource:current?.dataSource??regionalSources[region],telegramEnabled:Boolean(telegram?.enabled),telegramUsername:telegram?.getUsername()||null,
  api:{endpoint:'/api/v1/schedules',refreshIntervalSeconds:intervalSeconds,nextRefreshAt:refreshTimes.get(region)??null}};
 }
-telegram=await createTelegram({token:process.env.TELEGRAM_BOT_TOKEN,dataDir:dir,defaultRegion,getSnapshot:snapshot,lookupAddress,publicUrl:process.env.PUBLIC_URL||''});
+telegram=await createTelegram({token:process.env.TELEGRAM_BOT_TOKEN,dataDir:dir,defaultRegion,getSnapshot:snapshot,lookupAddress,lookupOutage,publicUrl:process.env.PUBLIC_URL||''});
 telegram.start();
 
 async function poll(region){
@@ -137,7 +137,7 @@ const allowApiRequest=rateLimiter(120,2400);
 const allowAddressRequest=rateLimiter(10,60);
 const addressFields=['region','city','street','house'];
 let runningAddressRequests=0;
-async function handleAddress(req,res,url){
+async function handleAddress(req,res,url,outage){
  const headers={'Content-Type':'application/json; charset=utf-8','Cache-Control':'private, no-store',
   'Access-Control-Allow-Origin':'*','Access-Control-Expose-Headers':'Retry-After'};
  const respond=(code,result,extra)=>{res.writeHead(code,{...headers,...extra});res.end(JSON.stringify(result));};
@@ -170,11 +170,11 @@ async function handleAddress(req,res,url){
      addressFields.some(key=>typeof input[key]!=='string'||!input[key].trim()||
       input[key].length>100||/[\u0000-\u001f\u007f]/u.test(input[key]))||!isRegion(input.region))throw Error('Invalid input');
  }catch{reject(400,'invalid');return;}
- if(!addressRegions.includes(input.region)){respond(200,{status:'unsupported',groups:[]});return;}
+ if(!(outage?outageRegions:addressRegions).includes(input.region)){respond(200,{status:'unsupported',groups:[]});return;}
  if(runningAddressRequests>=3){reject(429,'rate_limited',{'Retry-After':'5'});return;}
  runningAddressRequests++;
  try{
-  const result=await lookupAddress(input.region,input);
+  const result=await (outage?lookupOutage:lookupAddress)(input.region,input);
   respond(result.status==='invalid'?400:200,result);
  }finally{runningAddressRequests--;}
 }
@@ -190,7 +190,9 @@ const server=http.createServer({headersTimeout:10000,requestTimeout:15000,keepAl
   if((publicApi||path==='/api/schedule')&&!allowApiRequest(req)){
    res.writeHead(429,{'Retry-After':String(60-Math.floor(Date.now()/1000)%60),'Cache-Control':'no-store'});res.end();return;
   }
-  if(path==='/api/v1/address-queue'){await handleAddress(req,res,url);return;}
+  if(path==='/api/v1/address-queue'||path==='/api/v1/address-outage'){
+   await handleAddress(req,res,url,path.endsWith('-outage'));return;
+  }
   if(req.headers['transfer-encoding']||(req.headers['content-length']&&req.headers['content-length']!=='0')){
    res.writeHead(400,{'Connection':'close'});res.end();return;
   }
@@ -200,7 +202,7 @@ const server=http.createServer({headersTimeout:10000,requestTimeout:15000,keepAl
   if(!['GET','HEAD'].includes(req.method)){res.writeHead(405,{'Allow':'GET, HEAD'});res.end();return;}
   if(path==='/api/v1/regions'){
    res.writeHead(200,{'Content-Type':'application/json; charset=utf-8','Cache-Control':'public, max-age=300'});
-   res.end(req.method==='HEAD'?'':JSON.stringify({defaultRegion,regions:regions.map(code=>({code,name:regionNames[code],source:regionalSources[code],addressLookup:addressRegions.includes(code)}))}));return;
+   res.end(req.method==='HEAD'?'':JSON.stringify({defaultRegion,regions:regions.map(code=>({code,name:regionNames[code],source:regionalSources[code],addressLookup:addressRegions.includes(code),outageLookup:outageRegions.includes(code)}))}));return;
   }
   if(path==='/api/v1/schedules'||path==='/api/schedule'){
    const codes=url.searchParams.getAll('region');

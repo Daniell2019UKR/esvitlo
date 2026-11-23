@@ -50,7 +50,7 @@ function notificationKeyboard(subscription){
  })};
 }
 
-export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,publicUrl='',fetchImpl=fetch,renderImage=renderScheduleImage,now=()=>new Date(),chatIds=process.env.TELEGRAM_CHAT_IDS||'',initialGroups=process.env.TELEGRAM_GROUPS||'',identityRetryMs=60000,defaultRegion='o'}) {
+export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,lookupOutage,publicUrl='',fetchImpl=fetch,renderImage=renderScheduleImage,now=()=>new Date(),chatIds=process.env.TELEGRAM_CHAT_IDS||'',initialGroups=process.env.TELEGRAM_GROUPS||'',identityRetryMs=60000,defaultRegion='o'}) {
  if(!token) return {enabled:false,getUsername:()=>null,start(){},async stop(){},async notify(){},async flush(){},async pollOnce(){}};
  await mkdir(dataDir,{recursive:true});
  const path=join(dataDir,'telegram.json');
@@ -418,6 +418,25 @@ export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,pu
      } else if(['/reminder','/restore','/reminder_add','/reminder_remove'].includes(command)) {
       delete subscription.reminderInput;
       reminderSettings(key,subscription,command,args);
+     } else if(command==='/outage') {
+      const fields=args.join(' ').split('|').map(value=>value.trim());
+      if(fields.length!==3||fields.some(value=>!value||value.length>100)){
+       message(key,'Перевірка аварійного відключення для вибраного регіону. Напишіть /outage Населений пункт | Вулиця | Будинок.');
+      }else if(now().getTime()-(subscription.lastOutageCheck??-Infinity)<30000){
+       message(key,'Повторіть перевірку через 30 секунд.');
+      }else{
+       subscription.lastOutageCheck=now().getTime();
+       const [city,street,house]=fields;
+       const result=await lookupOutage?.(regionOf(subscription),{city,street,house});
+       const replies={no_emergency:'Оператор не повідомив про аварію за цією адресою.',
+        not_found:'Оператор не знайшов цей будинок.',ambiguous:'Адреса неоднозначна. Уточніть її на сайті оператора.',
+        unsupported:'Для цього оператора адресна перевірка аварій ще недоступна.'};
+       const reply=result?.status==='active'?['⚠ Аварійне відключення за адресою',result.reason,
+        result.startedAt&&'Початок: '+result.startedAt,
+        result.estimatedRestoration&&'Орієнтовне відновлення: '+result.estimatedRestoration].filter(Boolean).join('\n'):
+        replies[result?.status]??'Не вдалося перевірити аварії. Спробуйте пізніше.';
+       message(key,reply+(result?.source?'\n'+result.source:''));
+      }
      } else if(command==='/address') {
       const [city,street,house]=args.join(' ').split('|').map(value=>value.trim());
       const result=await lookupAddress?.(regionOf(subscription),{city,street,house});
@@ -543,7 +562,7 @@ export async function createTelegram({token,dataDir,getSnapshot,lookupAddress,pu
     try {
      const identity=await api('getMe',{});
      await locked(async()=>{state.username=identity.username||null;await persist();});
-     await api('setMyCommands',{commands:[{command:'start',description:'Увімкнути сповіщення'},{command:'region',description:'Обрати регіон'},{command:'group',description:'Обрати свою групу'},{command:'schedule',description:'Графіки на сьогодні та завтра'},{command:'notifications',description:'Налаштувати типи та звук сповіщень'},{command:'reminder',description:'Нагадування до відключення'},{command:'restore',description:'Нагадування до відновлення світла'},{command:'address',description:'Знайти чергу за адресою'},{command:'stop',description:'Вимкнути сповіщення'}]});
+     await api('setMyCommands',{commands:[{command:'start',description:'Увімкнути сповіщення'},{command:'region',description:'Обрати регіон'},{command:'group',description:'Обрати свою групу'},{command:'schedule',description:'Графіки на сьогодні та завтра'},{command:'notifications',description:'Налаштувати типи та звук сповіщень'},{command:'reminder',description:'Нагадування до відключення'},{command:'restore',description:'Нагадування до відновлення світла'},{command:'address',description:'Знайти чергу за адресою'},{command:'outage',description:'Перевірити аварію за адресою'},{command:'stop',description:'Вимкнути сповіщення'}]});
      commandsReady=true;
     } catch {if(running)console.warn('Telegram bot identity unavailable; will retry (credentials omitted).');}
    }

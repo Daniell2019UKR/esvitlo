@@ -83,3 +83,12 @@
 @media(max-width:900px){.change-outline{border-radius:2px}.change-outline.joins-left{border-top-left-radius:0;border-bottom-left-radius:0}.change-outline.joins-right{border-top-right-radius:0;border-bottom-right-radius:0}}
 
 #favorites{border:1px solid #354157;border-radius:12px;padding:10px;margin:0 0 12px}#favorites label{display:inline-flex;gap:6px;align-items:center;padding:8px}#favorites input{accent-color:#48df87}
+#address-outage:not([hidden]) { display: block; padding: 14px 16px; margin: 12px 0; border: 1px solid #45536a; border-radius: 12px; background: #1a2536; }
+#address-outage summary { cursor: pointer; font-weight: 650; }
+#address-outage-form { display: grid; grid-template-columns: repeat(auto-fit,minmax(min(100%,12rem),1fr)); align-items: end; gap: 12px; margin-top: 14px; }
+#address-outage-form label { display: grid; gap: 5px; }
+#address-outage-form input, #address-outage-form button { min-width: 0; min-height: 44px; border: 1px solid #64748b; border-radius: 8px; padding: 8px 10px; font: inherit; background: #101725; color: #f1f5f9; }
+#address-outage-form button { cursor: pointer; }
+#address-outage-form button:disabled { opacity: .65; cursor: wait; }
+#address-outage-result { white-space: pre-line; }
+#address-outage-result.address-alert { padding: 12px; border-radius: 8px; background: #531d26; color: #fff0f0; }

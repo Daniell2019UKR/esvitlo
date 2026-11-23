@@ -2,6 +2,21 @@ const source = 'https://cek.dp.ua/index.php/cpojivaham/pobutovi-spozhyvachi/vizn
 const mykolaivSource = 'https://off.energy.mk.ua/';
 const odesaSource = 'https://www.dtek-oem.com.ua/ua/shutdowns';
 export const addressRegions = ['o','cek','mykolaiv'];
+export const outageRegions = ['o'];
+
+export function odesaOutage(house) {
+ if (!house || house.cek || typeof house.type !== 'string') return {status:'unavailable'};
+ if (house.type === '1') return {status:'no_emergency'};
+ if (house.type === '' && house.sub_type === '' && house.start_date === '' && house.end_date === '')
+  return {status:'no_emergency'};
+ if (house.type !== '2') return {status:'unavailable'};
+ const clean = value => typeof value==='string'?value.replace(/<[^>]*>/gu,'').replace(/\s+/gu,' ').trim().slice(0,200):'';
+ const reason=clean(house.sub_type);
+ if (/^(?:стабілізаційн|планов)/iu.test(reason)) return {status:'no_emergency'};
+ if (!/^(?:аварій|екстрен)/iu.test(reason)) return {status:'unavailable'};
+ return {status:'active',reason,startedAt:clean(house.start_date),
+  estimatedRestoration:clean(house.end_date)};
+}
 
 const normal = value => value.normalize('NFC').toLocaleLowerCase('uk')
  .replace(/[’ʼ`]/gu,"'").replace(/\s+/gu,' ').trim();
@@ -40,7 +55,7 @@ async function odesaData(session, method, fields = {}) {
  return data;
 }
 
-async function resolveOdesa(input) {
+async function resolveOdesa(input, outage=false) {
  if (!odesa || Date.now() >= odesa.expires) {
   odesaRequest ??= (async () => {
    const response = await fetch(odesaSource,{redirect:'error',signal:AbortSignal.timeout(5000)});
@@ -56,6 +71,7 @@ async function resolveOdesa(input) {
   await odesaRequest;
  }
  const groups=new Set();
+ const matches=[];
  for(const [town,streets] of Object.entries(odesa.streets)){
   if(city(town)!==city(input.city)||!Array.isArray(streets))continue;
   for(const road of streets){
@@ -63,6 +79,7 @@ async function resolveOdesa(input) {
    const {data}=await odesaData(odesa,'getHomeNum',{city:town,street:road});
    for(const [number,house] of Object.entries(data??{})){
     if(normal(number)!==normal(input.house))continue;
+    if(outage){matches.push(house);continue;}
     for(const value of Array.isArray(house?.sub_type_reason)?house.sub_type_reason:[]){
      const match=/^GPV([1-6]\.[12])$/.exec(value);
      if(match)groups.add(match[1]);
@@ -70,7 +87,19 @@ async function resolveOdesa(input) {
    }
   }
  }
+ if(outage){
+  if(matches.length!==1)return {status:matches.length?'ambiguous':'not_found'};
+  return odesaOutage(matches[0]);
+ }
  return [...groups].sort();
+}
+
+export async function lookupOutage(region,input) {
+ if(!outageRegions.includes(region))return {status:'unsupported'};
+ if(['city','street','house'].some(key=>typeof input[key]!=='string'||!input[key].trim()||
+  input[key].length>100||/[\u0000-\u001f\u007f]/u.test(input[key])))return {status:'invalid'};
+ try{return {...await resolveOdesa(input,true),source:odesaSource};}
+ catch{return {status:'unavailable',source:odesaSource};}
 }
 
 async function mykolaivData(path) {
