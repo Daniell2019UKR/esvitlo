@@ -67,7 +67,7 @@ export function createPush(dataDir,audit){
  const app=initializeApp({credential:applicationDefault(),projectId:process.env.FCM_PROJECT_ID},'esvitlo-push');
  const messaging=getMessaging(app);
  if(dataDir)watchAndroidReleases(messaging,dataDir);
- return async(before,after,title,pollId)=>{
+ const push=async(before,after,title,pollId)=>{
   const events=pushEvents(before,after);
   for(let offset=0;offset<events.length;offset+=8){
    const batch=events.slice(offset,offset+8);
@@ -82,4 +82,6 @@ export function createPush(dataDir,audit){
    if(results.some(result=>result.status==='rejected'))console.warn('FCM delivery failed for one or more topics.');
   }
  };
+ push.sendAddress=(token,data)=>messaging.send({token,data,android:{priority:'high',ttl:15*60*1000}});
+ return push;
 }

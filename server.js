@@ -13,6 +13,7 @@ import {scheduleDates} from './public/dates.js';
 import {createPush} from './push.js';
 import {addressRegions,lookupAddress,outageRegions,lookupOutage} from './address-lookup.js';
 import {confirmEmergency} from './emergency.js';
+import {createAddressWatch} from './address-watch.js';
 
 const defaultRegion=process.env.REGION||'o';
 const regions=Object.keys(regionNames);
@@ -27,6 +28,13 @@ const dir=process.env.DATA_DIR||'./data';
 const audit=process.env.DETAILED_LOGGING==='1'?(event,fields)=>console.info(JSON.stringify({event,...fields})):undefined;
 const sendPush=createPush(dir,audit);
 await mkdir(dir,{recursive:true});
+const addressWatch=await createAddressWatch({dir,send:sendPush.sendAddress,audit});
+let addressTask;
+const addressTimer=setInterval(()=>{
+ if(addressTask)return;
+ addressTask=addressWatch.tick().catch(()=>console.warn('Address watch check failed.')).finally(()=>{addressTask=null;});
+},15000);
+addressTimer.unref();
 const empty=()=>({current:null,previous:null,checkedAt:null,lastSuccess:null,error:null,emergency:{active:null,message:null,areas:[],checkedAt:null,stale:true}});
 const states=new Map();
 const fileFor=region=>dir+'/state-'+region;
@@ -181,8 +189,25 @@ function rateLimiter(perClient, total){
 }
 const allowApiRequest=rateLimiter(120,2400);
 const allowAddressRequest=rateLimiter(10,60);
+const allowWatchRequest=rateLimiter(12,120);
 const addressFields=['region','city','street','house'];
 let runningAddressRequests=0;
+async function updateAddressWatch(req,res,url){
+ const finish=code=>{res.writeHead(code,{'Cache-Control':'private, no-store',...(code===204?{}:{Connection:'close'})});res.end();};
+ if(req.method!=='POST')return finish(405);
+ if(!allowWatchRequest(req))return finish(429);
+ if(url.search||req.headers['transfer-encoding']||req.headers['content-encoding']||
+    !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(req.headers['content-type']??'')||
+    !/^[1-9]\d{0,4}$/u.test(req.headers['content-length']??''))return finish(400);
+ if(Number(req.headers['content-length'])>24576)return finish(413);
+ let body;
+ try{
+  const chunks=[];
+  for await(const chunk of req)chunks.push(chunk);
+  body=JSON.parse(new TextDecoder('utf-8',{fatal:true}).decode(Buffer.concat(chunks)));
+ }catch{return finish(400);}
+ finish(await addressWatch.update(req.headers.authorization,body));
+}
 async function handleAddress(req,res,url,outage){
  const headers={'Content-Type':'application/json; charset=utf-8','Cache-Control':'private, no-store',
   'Access-Control-Allow-Origin':'*','Access-Control-Expose-Headers':'Retry-After'};
@@ -239,6 +264,7 @@ const server=http.createServer({headersTimeout:10000,requestTimeout:15000,keepAl
   if(path==='/api/v1/address-queue'||path==='/api/v1/address-outage'){
    await handleAddress(req,res,url,path.endsWith('-outage'));return;
   }
+  if(path==='/api/v1/address-watch'){await updateAddressWatch(req,res,url);return;}
   if(req.headers['transfer-encoding']||(req.headers['content-length']&&req.headers['content-length']!=='0')){
    res.writeHead(400,{'Connection':'close'});res.end();return;
   }
@@ -299,9 +325,10 @@ function schedulePoll(region,delay){
 async function shutdown(){
  if(stopping)return;
  stopping=true;
+ clearInterval(addressTimer);
  for(const timer of timers.values())clearTimeout(timer);
  server.close();
- await Promise.allSettled(inFlight);
+ await Promise.allSettled([...inFlight,addressTask]);
  await telegram.stop();
 }
 process.on('SIGTERM',()=>{void shutdown();});process.on('SIGINT',()=>{void shutdown();});

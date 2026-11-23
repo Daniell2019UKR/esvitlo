@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {khmelnytskyiOutage,odesaOutage} from './address-lookup.js';
+import {khmelnytskyiOutage,odesaOutage,powerOnOutage} from './address-lookup.js';
 
 test('DTEK type 2 needs an explicit emergency reason',()=>{
  const event={type:'2',start_date:'11:39 15.01.2026',end_date:'22:25 15.01.2026'};
@@ -23,4 +23,12 @@ test('Khmelnytskyi distinguishes local repair from schedule rows marked emergenc
  assert.deepEqual(khmelnytskyiOutage(table([schedule,repair])),{status:'active',
   reason:'Аварійні роботи',startedAt:repair[4],estimatedRestoration:repair[5]});
  assert.equal(khmelnytskyiOutage('<div>Service unavailable</div>').status,'unavailable');
+});
+
+test('street outage feeds match exact houses and collapse identical operator records',()=>{
+ const row={typeOff:1,switchSubReason:0,buildingNames:'11-А, 7',dateEvent:'2026-11-23T13:48:04+02:00'};
+ assert.equal(powerOnOutage([row,{...row,id:2}],'11а').status,'active');
+ assert.equal(powerOnOutage([row],'11').status,'no_emergency');
+ assert.equal(powerOnOutage([{...row,switchSubReason:2}],'7').status,'no_emergency');
+ assert.equal(powerOnOutage([{...row,buildingNames:'1–20'}],'7').status,'unavailable');
 });

@@ -3,7 +3,11 @@ const mykolaivSource = 'https://off.energy.mk.ua/';
 const odesaSource = 'https://www.dtek-oem.com.ua/ua/shutdowns';
 const khmelnytskyiSource = 'https://hoe.com.ua/shutdown/new';
 export const addressRegions = ['o','cek','mykolaiv'];
-export const outageRegions = ['o','khmelnytskyi'];
+const powerOn = {
+ lviv: {source:'https://poweron.loe.lviv.ua/',api:'https://power-api.loe.lviv.ua/api/'},
+ zhytomyr: {source:'https://ztoe-poweron.inneti.net/',api:'https://api-ztoe-poweron.inneti.net/api/'}
+};
+export const outageRegions = ['o','khmelnytskyi',...Object.keys(powerOn)];
 
 export function odesaOutage(house) {
  if (!house || house.cek || typeof house.type !== 'string') return {status:'unavailable'};
@@ -130,12 +134,71 @@ async function resolveKhmelnytskyi(input) {
   streetId:roads[0].id,house:matching[0]}))).text());
 }
 
+const powerOnCities=new Map();
+const houseKey=value=>normal(value).replace(/(?<=\d)[\s-]+(?=\p{L}$)/u,'');
+const operatorTime=new Intl.DateTimeFormat('uk-UA',{timeZone:'Europe/Kyiv',dateStyle:'short',timeStyle:'short'});
+const displayTime=value=>typeof value==='string'&&Number.isFinite(Date.parse(value))?operatorTime.format(new Date(value)):'';
+
+export function powerOnOutage(rows,house) {
+ let uncertain=false;
+ const active=new Map();
+ for(const row of rows){
+  if(row?.typeOff!==1||row.switchSubReason!==0)continue;
+  if(typeof row.buildingNames!=='string'||!row.buildingNames){uncertain=true;continue;}
+  const names=row.buildingNames.split(',').map(houseKey);
+  if(names.includes(houseKey(house)))active.set(JSON.stringify([row.dateEvent,row.datePlanIn]),row);
+  else if(names.some(name=>!/^\d+[\p{L}]?(?:\/\d+[\p{L}]?)?$/u.test(name)))uncertain=true;
+ }
+ if(active.size>1)return {status:'ambiguous'};
+ if(active.size===1){
+  const [row]=active.values();
+  return {status:'active',reason:'Аварійне відключення',
+   startedAt:displayTime(row.dateEvent),estimatedRestoration:displayTime(row.datePlanIn)};
+ }
+ return {status:uncertain?'unavailable':'no_emergency'};
+}
+
+async function resolvePowerOn(region,input) {
+ const {api,source}=powerOn[region];
+ const read=async (path,query)=>{
+  const url=new URL(path,api);url.search=new URLSearchParams({pagination:'false',...query});
+  const r=await fetch(url,{redirect:'error',headers:{accept:'application/json',referer:source},signal:AbortSignal.timeout(3000)});
+  if(!r.ok)throw Error('Address source unavailable');
+  const json=await r.json(), rows=Array.isArray(json)?json:json['hydra:member'];
+  if(!Array.isArray(rows)||(!Array.isArray(json)&&json['hydra:totalItems']!==rows.length))throw Error('Invalid address response');
+  return rows;
+ };
+ let catalog=powerOnCities.get(region);
+ if(!catalog||catalog.expires<=Date.now()){
+  catalog={expires:Date.now()+3600000,rows:read('pw_cities').catch(error=>{powerOnCities.delete(region);throw error;})};
+  powerOnCities.set(region,catalog);
+ }
+ const matches=(rows,value,normalize)=>rows.filter(item=>Number.isSafeInteger(item.id)&&typeof item.name==='string'&&
+  normalize(item.name)===normalize(value));
+ const [town,district]=input.city.split(/\s*\(/u,2);
+ const towns=matches(await catalog.rows,town,city).filter(item=>
+  !district||normal(item.otg?.name??'')===normal(district.replace(/\)\s*$/u,'')));
+ if(towns.length!==1)return {status:towns.length?'ambiguous':'not_found'};
+ const cityId=towns[0].id;
+ const roads=matches(await read('pw_streets',{'city.id':cityId}),input.street,street);
+ if(roads.length!==1)return {status:roads.length?'ambiguous':'not_found'};
+ const streetId=roads[0].id;
+ const rows=await read('pw_accidents',{'city.id':cityId,'street.id':streetId});
+ if(rows.some(row=>!Number.isInteger(row.typeOff)||row.street?.id!==streetId||row.city?.id!==cityId))
+  return {status:'unavailable'};
+ return powerOnOutage(rows,input.house);
+}
+
 export async function lookupOutage(region,input) {
  if(!outageRegions.includes(region))return {status:'unsupported'};
  if(['city','street','house'].some(key=>typeof input[key]!=='string'||!input[key].trim()||
   input[key].length>100||/[\u0000-\u001f\u007f]/u.test(input[key])))return {status:'invalid'};
- const source=region==='o'?odesaSource:khmelnytskyiSource;
- try{return {...await (region==='o'?resolveOdesa(input,true):resolveKhmelnytskyi(input)),source};}
+ const source=region==='o'?odesaSource:powerOn[region]?.source??khmelnytskyiSource;
+ try{
+  const result=region==='o'?await resolveOdesa(input,true):region==='khmelnytskyi'?
+   await resolveKhmelnytskyi(input):await resolvePowerOn(region,input);
+  return {...result,source};
+ }
  catch{return {status:'unavailable',source};}
 }
 
