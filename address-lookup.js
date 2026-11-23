@@ -1,8 +1,9 @@
 const source = 'https://cek.dp.ua/index.php/cpojivaham/pobutovi-spozhyvachi/viznachennya-chergy.html';
 const mykolaivSource = 'https://off.energy.mk.ua/';
 const odesaSource = 'https://www.dtek-oem.com.ua/ua/shutdowns';
+const khmelnytskyiSource = 'https://hoe.com.ua/shutdown/new';
 export const addressRegions = ['o','cek','mykolaiv'];
-export const outageRegions = ['o'];
+export const outageRegions = ['o','khmelnytskyi'];
 
 export function odesaOutage(house) {
  if (!house || house.cek || typeof house.type !== 'string') return {status:'unavailable'};
@@ -94,12 +95,48 @@ async function resolveOdesa(input, outage=false) {
  return [...groups].sort();
 }
 
+export function khmelnytskyiOutage(html) {
+ if (html.includes('За вказаною адресою відсутнє зареєстроване відключення')) return {status:'no_emergency'};
+ if (!/<table[^>]+class="[^"]*\btable-shutdowns\b/u.test(html)||!html.includes('Вид робіт')) return {status:'unavailable'};
+ const rows=[...html.matchAll(/<tr\b[^>]*>([\s\S]*?)<\/tr>/giu)].map(([,row])=>
+  [...row.matchAll(/<td\b[^>]*>([\s\S]*?)<\/td>/giu)].map(([,cell])=>cell.replace(/<[^>]*>/gu,'').trim()));
+ const local=rows.filter(row=>row[0]==='Аварійні'&&row[1]==='Аварійне'&&row.length===6);
+ if (local.length>1) return {status:'ambiguous'};
+ if (local.length===1) return {status:'active',reason:'Аварійні роботи',
+  startedAt:local[0][4],estimatedRestoration:local[0][5]==='-'?'':local[0][5]};
+ return rows.some(row=>row[0]&&!/^(?:Планові|Графік погодинних відключень)$/u.test(row[0])) ?
+  {status:'unavailable'}:{status:'no_emergency'};
+}
+
+async function resolveKhmelnytskyi(input) {
+ const read=async(path,body)=>{
+  const response=await fetch(new URL(path,khmelnytskyiSource),{...(body?{method:'POST',body}:{}),redirect:'error',
+   headers:{'X-Requested-With':'XMLHttpRequest',referer:khmelnytskyiSource},signal:AbortSignal.timeout(3000)});
+  if(!response.ok)throw Error('Address source unavailable');
+  return response;
+ };
+ const matches=(items,value,normalize)=>items.filter(item=>Number.isSafeInteger(item.id)&&typeof item.text==='string'&&
+  normalize(item.text)===normalize(value));
+ const settlements=await (await read('/settlements?term='+encodeURIComponent(city(input.city).split(' (')[0]))).json();
+ const exact=matches(settlements,input.city,city);
+ const towns=exact.length?exact:matches(settlements,input.city,value=>city(value).split(' (')[0]);
+ if(towns.length!==1)return {status:towns.length?'ambiguous':'not_found'};
+ const roads=matches(await (await read('/streets/'+towns[0].id+'?term='+encodeURIComponent(street(input.street)))).json(),input.street,street);
+ if(roads.length!==1)return {status:roads.length?'ambiguous':'not_found'};
+ const houses=await (await read('/houses/'+roads[0].id)).json();
+ const matching=houses.filter(value=>typeof value==='string'&&normal(value)===normal(input.house));
+ if(matching.length!==1)return {status:matching.length?'ambiguous':'not_found'};
+ return khmelnytskyiOutage(await (await read('/shutdown-events',new URLSearchParams({
+  streetId:roads[0].id,house:matching[0]}))).text());
+}
+
 export async function lookupOutage(region,input) {
  if(!outageRegions.includes(region))return {status:'unsupported'};
  if(['city','street','house'].some(key=>typeof input[key]!=='string'||!input[key].trim()||
   input[key].length>100||/[\u0000-\u001f\u007f]/u.test(input[key])))return {status:'invalid'};
- try{return {...await resolveOdesa(input,true),source:odesaSource};}
- catch{return {status:'unavailable',source:odesaSource};}
+ const source=region==='o'?odesaSource:khmelnytskyiSource;
+ try{return {...await (region==='o'?resolveOdesa(input,true):resolveKhmelnytskyi(input)),source};}
+ catch{return {status:'unavailable',source};}
 }
 
 async function mykolaivData(path) {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {odesaOutage} from './address-lookup.js';
+import {khmelnytskyiOutage,odesaOutage} from './address-lookup.js';
 
 test('DTEK type 2 needs an explicit emergency reason',()=>{
  const event={type:'2',start_date:'11:39 15.01.2026',end_date:'22:25 15.01.2026'};
@@ -12,4 +12,15 @@ test('DTEK type 2 needs an explicit emergency reason',()=>{
  assert.equal(odesaOutage({...event,type:'1'}).status,'no_emergency');
  assert.equal(odesaOutage({type:'',sub_type:'',start_date:'',end_date:''}).status,'no_emergency');
  assert.equal(odesaOutage({...event,cek:true}).status,'unavailable');
+});
+
+test('Khmelnytskyi distinguishes local repair from schedule rows marked emergency',()=>{
+ const table=rows=>'<table class="table-post-list table-shutdowns"><tr><th>Вид робіт</th></tr>'+
+  rows.map(row=>'<tr>'+row.map(value=>'<td>'+value+'</td>').join('')+'</tr>').join('')+'</table>';
+ const schedule=['Графік погодинних відключень','Аварійне','6.1','-','23.11.2026 13:00','23.11.2026 17:11'];
+ const repair=['Аварійні','Аварійне','6.1','-','23.11.2026 13:07','23.11.2026 19:07'];
+ assert.equal(khmelnytskyiOutage(table([schedule])).status,'no_emergency');
+ assert.deepEqual(khmelnytskyiOutage(table([schedule,repair])),{status:'active',
+  reason:'Аварійні роботи',startedAt:repair[4],estimatedRestoration:repair[5]});
+ assert.equal(khmelnytskyiOutage('<div>Service unavailable</div>').status,'unavailable');
 });
