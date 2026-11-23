@@ -46,9 +46,22 @@ if(region)regionSelect.value=region;
 const addressPanel=$('#address-outage');
 const addressForm=$('#address-outage-form');
 const addressResult=$('#address-outage-result');
+const addressFields=['city','street','house'];
+let addressRegion;
 let outageRegions=new Set();
 function showAddressPanel(){
  addressPanel.hidden=!outageRegions.has(region);
+ if(addressRegion===region)return;
+ addressRegion=region;
+ addressForm.reset();
+ addressResult.textContent='';
+ addressResult.classList.remove('address-alert');
+ try{
+  const saved=JSON.parse(stored('outage-address:'+region)||'null');
+  for(const field of addressFields){
+   if(typeof saved?.[field]==='string')addressForm.elements.namedItem(field).value=saved[field].slice(0,100);
+  }
+ }catch{/* Ignore invalid saved addresses. */}
 }
 fetch('/api/v1/regions').then(response=>response.json()).then(catalog=>{
  outageRegions=new Set(catalog.regions.filter(item=>item.outageLookup).map(item=>item.code));
@@ -57,7 +70,9 @@ fetch('/api/v1/regions').then(response=>response.json()).then(catalog=>{
 addressForm.oninput=()=>{addressResult.textContent='';addressResult.classList.remove('address-alert');};
 addressForm.onsubmit=async event=>{
  event.preventDefault();
- const input={...Object.fromEntries(new FormData(addressForm)),region};
+ const fields=Object.fromEntries(addressFields.map(field=>[field,addressForm.elements.namedItem(field).value.trim()]));
+ const input={...fields,region};
+ if(Object.values(fields).some(value=>!value))return;
  const button=addressForm.querySelector('button');
  button.disabled=true;
  addressResult.classList.remove('address-alert');
@@ -66,7 +81,8 @@ addressForm.onsubmit=async event=>{
   const response=await fetch('/api/v1/address-outage',{method:'POST',
    headers:{'Content-Type':'application/json'},body:JSON.stringify(input),signal:AbortSignal.timeout(15000)});
   const result=await response.json();
-  if(region!==input.region||Object.entries(Object.fromEntries(new FormData(addressForm))).some(([key,value])=>input[key]!==value))return;
+  if(region!==input.region||addressFields.some(field=>addressForm.elements.namedItem(field).value.trim()!==fields[field]))return;
+  if(response.ok&&['active','no_emergency'].includes(result.status))remember('outage-address:'+input.region,JSON.stringify(fields));
   const messages={no_emergency:'Оператор не повідомив про аварію за цією адресою.',
    not_found:'Оператор не знайшов цей будинок.',ambiguous:'Адреса неоднозначна. Уточніть її на сайті оператора.',
    rate_limited:'Забагато запитів. Спробуйте трохи пізніше.'};
@@ -94,7 +110,7 @@ restoreGroup(region);
 $('#group').onchange=e=>{filter=e.target.value;favoriteList.hidden=filter!=='favorites';if(region)remember('group:'+region,filter);render();};
 regionSelect.onchange=()=>{
  region=regionSelect.value;remember('region',region);restoreGroup(region);
- addressForm.reset();addressResult.textContent='';addressResult.classList.remove('address-alert');showAddressPanel();
+ showAddressPanel();
  data=null;$('#chart').replaceChildren();$('#emergency').hidden=true;$('#my-group').hidden=true;
  $('#region').textContent=regionNames[region];$('#source').removeAttribute('href');
  $('#public-api').href='/api/v1/schedules?region='+region;
